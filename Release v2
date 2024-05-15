@@ -1,0 +1,998 @@
+#include <iostream>
+#include <SFML/Graphics.hpp>
+#include <ctime>
+#include <list>
+#include <chrono>
+#include <random>
+#include <vector>
+#include <string>
+#include <mongocxx/client.hpp>
+#include <bsoncxx/json.hpp>
+#include <mongocxx/instance.hpp>
+#include <bsoncxx/builder/stream/document.hpp> 
+#include <iomanip>
+
+using namespace std;
+
+struct bulletStruct  
+{
+    //non-static characteristics that must be updated within the while loop to create motion
+    string direction;
+    float ranValue; 
+    int bounces; 
+};
+
+struct enemyStruct
+{
+    sf::Vector2f direction;
+};
+
+struct pointStruct
+{
+    chrono::system_clock::time_point spawnTime;      
+};
+
+struct BucketItem {
+    int num;
+    string name;  
+};
+
+void sendToMongo(mongocxx::collection& coll, string name, int score) 
+{
+    bsoncxx::builder::stream::document document{};
+    string sScore = to_string(score);  
+    document << "name" << name << "score" << sScore;      
+    coll.insert_one(document.view());        
+}
+
+void bucketSort(vector<int>& scores, vector<string>& names) {  
+    // Find maximum element in the array
+    int max = *max_element(scores.begin(), scores.end()); 
+
+    // Create buckets
+    vector<vector<BucketItem>> buckets(max + 1);
+
+    // Put elements into buckets 
+    for (size_t i = 0; i < scores.size(); i++) {   
+        buckets[scores[i]].push_back({ scores[i], names[i] });   
+    }
+
+    // Sort each bucket and put elements back into the vectors
+    int index = 0;
+    for (int i = max; i >= 0; i--) {
+        for (BucketItem item : buckets[i]) {
+            scores[index] = item.num;  
+            names[index] = item.name; 
+            index++; 
+        }
+    }
+}
+
+//TODO:
+//IMPORTANT: CHANGE PLAYERSCORE TO STRING BEFORE SENDING TO MONGO (DONE)
+//implement bucket sort on leaderboard and then display leaderboard in window
+//add +1 popup at deathpoint of enemies that sit in a data structure and are drawn until they are deleted using a time check to see if 1 or 2 seconds have passed (DONE)
+
+
+int main()
+{
+    srand(static_cast<unsigned int>(time(NULL))); 
+    sf::Clock AITimer;
+    sf::Clock clock;
+    float deltaTime = clock.restart().asSeconds();
+
+    const float pi = 3.14159f; 
+    const float gameWidth = 1000; 
+    const float gameHeight = 800;
+    const sf::Time AITime = sf::seconds(0.1f);
+
+    //giving starting value to shoot limiter
+    auto lastShot = chrono::system_clock::now();
+
+    //giving starting value to spawn limiter
+    auto lastSpawn = chrono::system_clock::now();
+
+    const float playerSpeed = 400.f; 
+    sf::Vector2f playerSize(25, 25);
+    int playerScore = 0;
+
+    //random num. generator for bullet vector
+    random_device bulletrd; 
+    mt19937 bulletgen(bulletrd());  
+    uniform_real_distribution<> bulletdis(-0.25f, 0.25f); 
+    float bulletRadius = 10.f;
+    const float bulletSpeed = 600.f;  
+    string lastMove;
+
+    //random num. generator for enemy spawn location
+    random_device enemyrd; 
+    mt19937 enemygen(enemyrd());  
+    uniform_int_distribution<> enemydis(1,8);   
+    const float enemySpeed = 100.f;
+    const float spawnLimitInMS = 2500; 
+    
+    //creates window of application
+    sf::RenderWindow window(sf::VideoMode(static_cast<unsigned int>(gameWidth), static_cast<unsigned int>(gameHeight), 32), "Test",
+        sf::Style::Titlebar | sf::Style::Close);
+    window.setVerticalSyncEnabled(true);
+
+    sf::Font font; 
+
+    if (!font.loadFromFile("resources/ShooterFont.ttf")) 
+    {
+        return EXIT_FAILURE; 
+    }
+
+    //create player shape
+    sf::RectangleShape player; 
+    player.setSize(playerSize - sf::Vector2f(3, 3)); 
+    player.setOutlineThickness(3); 
+    player.setOutlineColor(sf::Color::Cyan);   
+    player.setFillColor(sf::Color(250, 250, 200)); 
+    player.setOrigin(playerSize / 2.f);
+
+
+    sf::Text pauseMessage1;  
+    pauseMessage1.setFont(font); 
+    pauseMessage1.setCharacterSize(40); 
+    pauseMessage1.setFillColor(sf::Color::Yellow);  
+    pauseMessage1.setString("Welcome to Shooter Game!");  
+    sf::FloatRect pauseBounds1 = pauseMessage1.getLocalBounds();  
+    float pauseWidth1 = pauseBounds1.width; 
+    float pauseX1 = (gameWidth / 2) - (pauseWidth1 / 2);   
+    pauseMessage1.setPosition(pauseX1, 100.f);
+
+    sf::Text pauseMessage2;  
+    pauseMessage2.setFont(font);  
+    pauseMessage2.setCharacterSize(40); 
+    pauseMessage2.setFillColor(sf::Color::Yellow);  
+    pauseMessage2.setString("Press 'Enter' to start the game");  
+    sf::FloatRect pauseBounds2 = pauseMessage2.getLocalBounds(); 
+    float pauseWidth2 = pauseBounds2.width;  
+    float pauseX2 = (gameWidth / 2) - (pauseWidth2 / 2);   
+    pauseMessage2.setPosition(pauseX2, 200.f);  
+
+    sf::Text pauseMessage3;  
+    pauseMessage3.setFont(font); 
+    pauseMessage3.setCharacterSize(40); 
+    pauseMessage3.setFillColor(sf::Color::Yellow);  
+    pauseMessage3.setString("Or 'L' to view the leaderboard.");  
+    sf::FloatRect pauseBounds3 = pauseMessage3.getLocalBounds();   
+    float pauseWidth3 = pauseBounds3.width;   
+    float pauseX3 = (gameWidth / 2) - (pauseWidth3 / 2);     
+    pauseMessage3.setPosition(pauseX3, 300.f);  
+
+    sf::Text gameplayInstructions;   
+    gameplayInstructions.setFont(font);
+    gameplayInstructions.setCharacterSize(25);
+    gameplayInstructions.setFillColor(sf::Color::Yellow); 
+    gameplayInstructions.setString("Use the arrow keys to move the square and\nPress 'spacebar' to fire bullets at the enemies!");
+    gameplayInstructions.setPosition(20.f, 730.f);      
+
+    sf::Text score; 
+    score.setFont(font); 
+    score.setCharacterSize(40); 
+    score.setPosition(gameWidth - 150, 15); 
+    score.setFillColor(sf::Color::Yellow); 
+
+    //text data for ending screen
+    sf::Text endingScreen1; 
+    endingScreen1.setFont(font); 
+    endingScreen1.setCharacterSize(60); 
+    endingScreen1.setFillColor(sf::Color::Red); 
+    endingScreen1.setString("You Lose!"); 
+    sf::FloatRect endingBounds1 = endingScreen1.getLocalBounds();   
+    float endingWidth1 = endingBounds1.width;       
+    float endingX1 = (gameWidth / 2) - (endingWidth1 / 2);            
+    endingScreen1.setPosition(endingX1, 150.f);  
+
+    sf::Text endingScreen2;   
+    endingScreen2.setFont(font); 
+    endingScreen2.setCharacterSize(60); 
+    endingScreen2.setFillColor(sf::Color::Red);
+
+    sf::Text endingScreen3;   
+    endingScreen3.setFont(font); 
+    endingScreen3.setCharacterSize(60); 
+    endingScreen3.setFillColor(sf::Color::Red); 
+    endingScreen3.setString("Press 'Enter' to begin a new run"); 
+    sf::FloatRect endingBounds3 = endingScreen3.getLocalBounds(); 
+    float endingWidth3 = endingBounds3.width;  
+    float endingX3 = (gameWidth / 2) - (endingWidth3 / 2);   
+    endingScreen3.setPosition(endingX3, 350.f);
+    sf::Text endingScreen4;    
+    endingScreen4.setFont(font);  
+    endingScreen4.setCharacterSize(60);   
+    endingScreen4.setFillColor(sf::Color::Red);  
+    endingScreen4.setString("Or 'L' to view the leaderboard!");   
+    sf::FloatRect endingBounds4 = endingScreen4.getLocalBounds();  
+    float endingWidth4 = endingBounds4.width;   
+    float endingX4 = (gameWidth / 2) - (endingWidth4 / 2); 
+    endingScreen4.setPosition(endingX4, 450.f);  
+
+    bool isPlaying = false;
+    bool lost = false;
+    bool isStart = true;
+
+    // Text for displaying user input
+    sf::Text startingText1; 
+    startingText1.setFont(font); 
+    startingText1.setCharacterSize(40); 
+    startingText1.setFillColor(sf::Color::Yellow);  
+    startingText1.setString("Welcome to Shooter Game!");  
+    sf::FloatRect startingBounds1 = startingText1.getLocalBounds();  
+    float startingWidth1 = startingBounds1.width;     
+    float startingX1 = (gameWidth / 2) - (startingWidth1 / 2);   
+    startingText1.setPosition(startingX1, 100.f);  
+
+    sf::Text startingText2;   
+    startingText2.setFont(font); 
+    startingText2.setCharacterSize(40); 
+    startingText2.setFillColor(sf::Color::Yellow);  
+    startingText2.setString("Please Enter your username and then press space: "); 
+    sf::FloatRect startingBounds2 = startingText2.getLocalBounds(); 
+    float startingWidth2 = startingBounds2.width;   
+    float startingX2 = (gameWidth / 2) - (startingWidth2 / 2);  
+    startingText2.setPosition(startingX2, 180.f);   
+
+    sf::Text userNameText;  
+    userNameText.setFont(font); 
+    userNameText.setCharacterSize(40); 
+    userNameText.setFillColor(sf::Color::White);   
+    sf::FloatRect userNameBounds = userNameText.getLocalBounds();    
+    float userNameWidth = userNameBounds.width;      
+    float userNameX = (gameWidth / 2) - (userNameWidth / 2);   
+    userNameText.setPosition(userNameX, 200.f); 
+
+    sf::Text topLeftName;
+    topLeftName.setFont(font); 
+    topLeftName.setCharacterSize(40);  
+    topLeftName.setFillColor(sf::Color::Yellow); 
+    topLeftName.setPosition(15.f, 15.f);
+
+    sf::Text leaderboardTop;   
+    leaderboardTop.setFont(font);  
+    leaderboardTop.setCharacterSize(40);  
+    leaderboardTop.setFillColor(sf::Color::Yellow);  
+    leaderboardTop.setString("Shooter Game Leaderboard!");  
+    sf::FloatRect leaderTopBounds = leaderboardTop.getLocalBounds();  
+    leaderboardTop.setPosition((gameWidth - leaderTopBounds.width) / 2, 50.f);  
+
+    sf::Text leaderboardMiddle;    
+    leaderboardMiddle.setFont(font); 
+    leaderboardMiddle.setCharacterSize(30); 
+    leaderboardMiddle.setFillColor(sf::Color::Yellow); 
+    leaderboardMiddle.setString("Use the 'left' and 'right' arrow keys to traverse the leaderboard pages!"); 
+    sf::FloatRect leaderMiddleBounds = leaderboardMiddle.getLocalBounds(); 
+    leaderboardMiddle.setPosition((gameWidth - leaderMiddleBounds.width) / 2, 700.f); 
+
+    sf::Text leaderboardBottom;  
+    leaderboardBottom.setFont(font); 
+    leaderboardBottom.setCharacterSize(30); 
+    leaderboardBottom.setFillColor(sf::Color::Yellow); 
+    leaderboardBottom.setString("Press 'Enter' to begin again or 'Escape' to exit the game!");  
+    sf::FloatRect leaderBottomBounds = leaderboardBottom.getLocalBounds();   
+    leaderboardBottom.setPosition((gameWidth - leaderBottomBounds.width) / 2, 750.f);    
+
+    //open connection to mongoDB
+    // Create an instance.
+    mongocxx::instance inst{}; 
+    const auto uri = mongocxx::uri{ "mongodb+srv://player1945:shootergame1936@shootergame.e2pmdi8.mongodb.net/?retryWrites=true&w=majority" }; 
+    // Set the version of the Stable API on the client
+    mongocxx::options::client client_options; 
+    const auto api = mongocxx::options::server_api{ mongocxx::options::server_api::version::k_version_1 }; 
+    client_options.server_api_opts(api); 
+    // Setup the connection and get a handle on the "ShooterGame" database.
+
+
+    // String to hold the user input
+    string userInput = "";
+    list<pair<bulletStruct, sf::CircleShape>> bulletList;
+    list<pair<enemyStruct, sf::CircleShape>> enemyList;
+    list<pair<pointStruct, sf::Text>> pointGetList; 
+    vector<sf::Text> leaderboardEntries; 
+
+    bool isEnteringUsername = true;
+    bool runDone = false;
+    bool drawleaderboard = false;
+    bool refreshLeaderboard = false;
+    int pageNum = 0;
+    float spawnBuff = 0;
+    while (window.isOpen())
+    {
+        sf::Event event;
+        while (window.pollEvent(event))
+        {
+            if ((event.type == sf::Event::Closed) || ((event.type == sf::Event::KeyPressed) && (event.key.code == sf::Keyboard::Escape)))
+            {
+                window.close();
+                break;
+            }
+
+            if (event.type == sf::Event::Resized) 
+            {
+                sf::View view; 
+                view.setSize(gameWidth, gameHeight); 
+                view.setCenter(gameWidth / 2.f, gameHeight / 2.f); 
+                window.setView(view); 
+            } 
+
+            //ask for name input
+            if (isEnteringUsername && event.type == sf::Event::TextEntered) {
+                // Handle text input events
+                if (event.text.unicode == 8 && !userInput.empty()) {
+                    // Backspace - remove the last character
+                    userInput.pop_back();
+                }
+                else if (event.text.unicode < 128 && userInput.length() < 10) { 
+                    // Append character to the user input
+                    userInput += static_cast<char>(event.text.unicode);
+                }
+
+                // Update the text to display user input
+                userNameBounds = userNameText.getLocalBounds();   
+                userNameWidth = userNameBounds.width;  
+                userNameText.setPosition((gameWidth - userNameWidth) / 2, 225.f); 
+                userNameText.setString(userInput);      
+            }
+
+            if (isEnteringUsername && event.type == sf::Event::KeyPressed && event.key.code == sf::Keyboard::Space) { 
+                // Start the game when Space is pressed
+                isEnteringUsername = false;
+                while (userInput.length() < 3) 
+                {
+                    userInput.append(" "); 
+                }
+                topLeftName.setString(userInput); 
+            }
+
+            if (((event.type == sf::Event::KeyPressed) && (event.key.code == sf::Keyboard::Enter && !isPlaying && !isEnteringUsername))) 
+            {
+                if (!isPlaying)
+                {
+                    //check if last run must be uploaded
+                    if (runDone) 
+                    {
+                        try
+                        {
+                            mongocxx::client conn{ uri, client_options }; 
+                            mongocxx::database db = conn["ShooterGame"]; 
+                            // Ping the database. 
+                            const auto ping_cmd = bsoncxx::builder::basic::make_document(bsoncxx::builder::basic::kvp("ping", 1));  
+                            db.run_command(ping_cmd.view()); 
+                            cout << "Pinged your deployment. You successfully connected to MongoDB!" << endl; 
+                            auto leaderboard = db["Leaderboard"]; 
+                            sendToMongo(leaderboard, userInput, playerScore);
+                            cout << "Player " << userInput << " with score of " << playerScore << " inserted into leaderboard." << endl;
+                        }
+                        catch (const exception& e)
+                        {
+                            // Handle errors
+                            cout << "Exception while connecting to MongoDB deployment: " << e.what() << endl;
+                        }
+                        runDone = false;
+                    }
+
+                    // (re)start the game
+                    isPlaying = true;
+                    clock.restart();
+                    drawleaderboard = false;
+                    //reset buff to spawnrate that accrued during gameplay
+                    spawnBuff = 0;
+
+                    // Reset the position of the player
+                    player.setPosition(gameWidth / 2.f, gameHeight / 2.f);
+
+                    //clear all bullets and enemies from previous session
+                    bulletList.clear();
+                    enemyList.clear();
+                    leaderboardEntries.clear(); 
+                    pointGetList.clear();  
+
+                    //reset score
+                    playerScore = 0;
+                     
+                }
+            }
+            if (((event.type == sf::Event::KeyPressed) && (event.key.code == sf::Keyboard::Right && !isPlaying && !isEnteringUsername && drawleaderboard == true))) 
+            {
+                pageNum++;
+                leaderboardEntries.clear();
+                refreshLeaderboard = true; 
+            }
+            else if (((event.type == sf::Event::KeyPressed) && (event.key.code == sf::Keyboard::Left && !isPlaying && !isEnteringUsername && drawleaderboard == true)))  
+            {
+                if (pageNum > 0)
+                {
+                    pageNum--;
+                    leaderboardEntries.clear();
+                    refreshLeaderboard = true;  
+                }
+                else if (pageNum == 0) 
+                {
+                    leaderboardEntries.clear();
+                    refreshLeaderboard = true; 
+                }
+            }
+            //create code for displaying leaderboard
+            if (((event.type == sf::Event::KeyPressed) && (event.key.code == sf::Keyboard::L && !isPlaying && !isEnteringUsername)) || refreshLeaderboard == true)   
+            {
+                refreshLeaderboard = false;  
+
+                mongocxx::client conn(uri, client_options); 
+                mongocxx::database db = conn["ShooterGame"];  
+                mongocxx::collection coll = db["Leaderboard"]; 
+
+                // Query for documents in the collection 
+                mongocxx::cursor cursor = coll.find({}); 
+                vector<int> leaderboardScore; 
+                vector<string> leaderboardName;
+                try
+                {
+                    // iterate through collection's documents and place data in leaderboard vector
+                    bool scoreCheck = false;
+                    bool nameCheck = false;
+                    for (auto&& doc : cursor)  
+                    { 
+                        bsoncxx::document::element nameElem = doc["name"];
+                        string_view nameView(nameElem.get_string().value.data(), nameElem.get_string().value.size());   
+                        bsoncxx::document::element scoreElem = doc["score"]; 
+                        string_view scoreView(scoreElem.get_string().value.data(), scoreElem.get_string().value.size()); 
+                        int score;
+                        string finalNameString; 
+                        if (scoreElem && scoreElem.type() == bsoncxx::type::k_string)      
+                        {
+                            string scoreString(scoreView); 
+                            score = stoi(scoreString); // Convert string to integer   
+                            scoreCheck = true; 
+                            //cout << "score k_string" << endl;           
+                        }
+                        else 
+                        {
+                            cerr << "Error: 'score' field is missing or not an integer type." << endl; 
+                        }
+
+                        if (nameElem && nameElem.type() == bsoncxx::type::k_string)  
+                        {
+                            //cout << "name k_string" << endl;
+                            finalNameString = nameView; 
+                            nameCheck = true;  
+                        }
+                        else
+                        {
+                            cerr << "Error: 'score' field is missing or not an integer type." << endl; 
+                        }
+
+                        if (nameCheck == true && scoreCheck == true)
+                        {
+                            leaderboardName.push_back(finalNameString);     
+                            leaderboardScore.push_back(score);
+                            nameCheck = false; 
+                            scoreCheck = false;
+                        }
+
+                        drawleaderboard = true;
+                    }
+
+                    //sort leaderboard vector based on score value in descending order
+                    bucketSort(leaderboardScore, leaderboardName);
+
+                    for (int i = (pageNum * 10); i < leaderboardName.size(); i++) 
+                    {
+                        sf::Text text; 
+                        text.setFont(font); 
+                        //cout << "[i]: " << leaderboardName[i] << endl; 
+                        text.setCharacterSize(40);   
+                        text.setFillColor(sf::Color::Yellow); 
+                        if (i % 10 == 0)
+                        {
+                            //left
+
+                            string stringName = to_string(i + 1) + ". ";
+                            stringName.append(leaderboardName[i]);  
+                            stringName.append(" ");  
+                            stringName.append(to_string(leaderboardScore[i]));  
+                            text.setString(stringName);  
+                            sf::FloatRect textBorders = text.getLocalBounds();  
+                            text.setPosition(350.f - textBorders.width, 130.f); 
+                        }
+                        else if (i % 10 == 1)  
+                        {
+                            //right
+
+                            string stringName = to_string(i + 1) + ". "; 
+                            stringName.append(leaderboardName[i]); 
+                            stringName.append(" "); 
+                            stringName.append(to_string(leaderboardScore[i])); 
+                            text.setString(stringName); 
+                            sf::FloatRect textBorders = text.getLocalBounds(); 
+                            text.setPosition(800.f - textBorders.width, 130.f); 
+                        } 
+                        else if (i % 10 == 2)  
+                        {
+                            //second-left
+                            string stringName = to_string(i + 1) + ". "; 
+                            stringName.append(leaderboardName[i]);
+                            stringName.append(" "); 
+                            stringName.append(to_string(leaderboardScore[i])); 
+                            text.setString(stringName); 
+                            sf::FloatRect textBorders = text.getLocalBounds(); 
+                            text.setPosition(350.f - textBorders.width, 230.f);   
+                        }
+                        else if (i % 10 == 3)
+                        {
+                            //second-right
+                            
+                            string stringName = to_string(i + 1) + ". "; 
+                            stringName.append(leaderboardName[i]); 
+                            stringName.append(" "); 
+                            stringName.append(to_string(leaderboardScore[i])); 
+                            text.setString(stringName); 
+                            sf::FloatRect textBorders = text.getLocalBounds(); 
+                            text.setPosition(800.f - textBorders.width, 230.f); 
+                        }
+                        else if (i % 10 == 4)
+                        {
+                            //third-left
+                            
+                            string stringName = to_string(i + 1) + ". "; 
+                            stringName.append(leaderboardName[i]); 
+                            stringName.append(" "); 
+                            stringName.append(to_string(leaderboardScore[i])); 
+                            text.setString(stringName); 
+                            sf::FloatRect textBorders = text.getLocalBounds(); 
+                            text.setPosition(350.f - textBorders.width, 330.f); 
+                        }
+                        else if (i % 10 == 5)
+                        {
+                            //third-right
+                            string stringName = to_string(i + 1) + ". "; 
+                            stringName.append(leaderboardName[i]); 
+                            stringName.append(" "); 
+                            stringName.append(to_string(leaderboardScore[i])); 
+                            text.setString(stringName); 
+                            sf::FloatRect textBorders = text.getLocalBounds(); 
+                            text.setPosition(800.f - textBorders.width, 330.f); 
+                        }
+                        else if (i % 10 == 6)
+                        {
+                            //fourth-left
+                            
+                            string stringName = to_string(i + 1) + ". "; 
+                            stringName.append(leaderboardName[i]); 
+                            stringName.append(" "); 
+                            stringName.append(to_string(leaderboardScore[i])); 
+                            text.setString(stringName); 
+                            sf::FloatRect textBorders = text.getLocalBounds(); 
+                            text.setPosition(350.f - textBorders.width, 430.f); 
+                        }
+                        else if (i % 10 == 7)
+                        {
+                            //fourth-right
+                            
+                            string stringName = to_string(i + 1) + ". "; 
+                            stringName.append(leaderboardName[i]);  
+                            stringName.append(" ");  
+                            stringName.append(to_string(leaderboardScore[i]));  
+                            text.setString(stringName);  
+                            sf::FloatRect textBorders = text.getLocalBounds(); 
+                            text.setPosition(800.f - textBorders.width, 430.f); 
+                        }
+                        else if (i % 10 == 8)
+                        {
+                            //fifth-left
+                            
+                            string stringName = to_string(i + 1) + ". "; 
+                            stringName.append(leaderboardName[i]); 
+                            stringName.append(" "); 
+                            stringName.append(to_string(leaderboardScore[i])); 
+                            text.setString(stringName); 
+                            sf::FloatRect textBorders = text.getLocalBounds(); 
+                            text.setPosition(350.f - textBorders.width, 530.f); 
+                        }
+                        else if (i % 10 == 9)
+                        {
+                            //fifth-right
+                            
+                            string stringName = to_string(i + 1) + ". "; 
+                            stringName.append(leaderboardName[i]); 
+                            stringName.append(" ");  
+                            stringName.append(to_string(leaderboardScore[i])); 
+                            text.setString(stringName); 
+                            sf::FloatRect textBorders = text.getLocalBounds(); 
+                            text.setPosition(800.f - textBorders.width, 530.f);
+                        }
+                        leaderboardEntries.push_back(text);
+                        if (i >= ((pageNum * 10) + 9))
+                        {
+                            break; 
+                        }
+                    }
+                }
+                catch (const exception& e) 
+                {
+                    cerr << "Error while collecting data from leaderboard documents: " << e.what() << endl; 
+                    return 1;
+                }
+
+            }
+
+        }
+        if (isPlaying)
+        {
+            float deltaTime = clock.restart().asSeconds(); 
+            //receive movement from user
+            if (sf::Keyboard::isKeyPressed(sf::Keyboard::Up) && (player.getPosition().y - playerSize.y / 2 > 3.f)) 
+            {
+                player.move(0.f, -playerSpeed * deltaTime);
+                lastMove = "up";
+            } 
+            if (sf::Keyboard::isKeyPressed(sf::Keyboard::Down) && (player.getPosition().y + playerSize.y / 2 < gameHeight - 3.f))  
+            {
+                player.move(0.f, playerSpeed * deltaTime);
+                lastMove = "down"; 
+            }
+            if (sf::Keyboard::isKeyPressed(sf::Keyboard::Left) && (player.getPosition().x + playerSize.x / 2 > 27.f)) 
+            {
+                player.move(-playerSpeed * deltaTime, 0.f);
+                lastMove = "left"; 
+            }
+            if (sf::Keyboard::isKeyPressed(sf::Keyboard::Right) && (player.getPosition().x - playerSize.x / 2 < gameWidth - 27.f))  
+            {
+                player.move(playerSpeed * deltaTime, 0.f);
+                lastMove = "right"; 
+            } 
+
+            //put shooting function here
+            //add time minimum to shooting so shooting is not infinite
+            
+            if (sf::Keyboard::isKeyPressed(sf::Keyboard::Space))  
+            { 
+                auto thisShot = chrono::system_clock::now();
+                auto timeSinceLastShot = thisShot - lastShot; 
+                auto timeSinceInMS = chrono::duration_cast<chrono::milliseconds>(timeSinceLastShot).count();         
+                if (timeSinceInMS >= 500)       
+                {
+                    lastShot = chrono::system_clock::now(); 
+                    double ranNum = bulletdis(bulletgen);    
+                    if (lastMove == "up")
+                    {
+                        //make bulletStruct
+                        bulletStruct bulletUp;
+                        bulletUp.direction = "up";
+                        bulletUp.bounces = 0;
+                        bulletUp.ranValue = ranNum;
+
+                        //make bullet primitive shape
+                        sf::CircleShape bulletShape;
+                        bulletShape.setRadius(bulletRadius - 3);
+                        bulletShape.setOutlineThickness(2);
+                        bulletShape.setOutlineColor(sf::Color::White);
+                        bulletShape.setFillColor(sf::Color::Black);
+                        bulletShape.setOrigin(bulletRadius / 2, bulletRadius / 2);
+                        bulletShape.setPosition(player.getPosition().x, player.getPosition().y - 25);
+                        bulletList.emplace_back(bulletUp, bulletShape);
+                    }
+                    else if (lastMove == "down")
+                    {
+                        bulletStruct bulletDown;
+                        bulletDown.direction = "down";
+                        bulletDown.bounces = 0;
+                        bulletDown.ranValue = ranNum;
+
+                        //make bullet primitive shape
+                        sf::CircleShape bulletShape;
+                        bulletShape.setRadius(bulletRadius - 3);
+                        bulletShape.setOutlineThickness(2);
+                        bulletShape.setOutlineColor(sf::Color::White);
+                        bulletShape.setFillColor(sf::Color::Black);
+                        bulletShape.setOrigin(bulletRadius / 2, bulletRadius / 2);
+                        bulletShape.setPosition(player.getPosition().x, player.getPosition().y + 35);
+                        bulletList.emplace_back(bulletDown, bulletShape);
+                    }
+                    else if (lastMove == "left")
+                    {
+                        bulletStruct bulletLeft;
+                        bulletLeft.direction = "left";
+                        bulletLeft.bounces = 0;
+                        bulletLeft.ranValue = ranNum;
+
+                        //make bullet primitive shape
+                        sf::CircleShape bulletShape;
+                        bulletShape.setRadius(bulletRadius - 3);
+                        bulletShape.setOutlineThickness(2);
+                        bulletShape.setOutlineColor(sf::Color::White);
+                        bulletShape.setFillColor(sf::Color::Black);
+                        bulletShape.setOrigin(bulletRadius / 2, bulletRadius / 2);
+                        bulletShape.setPosition(player.getPosition().x - 25, player.getPosition().y);
+                        bulletList.emplace_back(bulletLeft, bulletShape);
+                    }
+                    else if (lastMove == "right")
+                    {
+                        bulletStruct bulletRight;
+                        bulletRight.direction = "right";
+                        bulletRight.bounces = 0;
+                        bulletRight.ranValue = ranNum;
+
+                        //make bullet primitive shape
+                        sf::CircleShape bulletShape;
+                        bulletShape.setRadius(bulletRadius - 3);
+                        bulletShape.setOutlineThickness(2);
+                        bulletShape.setOutlineColor(sf::Color::White);
+                        bulletShape.setFillColor(sf::Color::Black);
+                        bulletShape.setOrigin(bulletRadius / 2, bulletRadius / 2);
+                        bulletShape.setPosition(player.getPosition().x + 25, player.getPosition().y);
+                        bulletList.emplace_back(bulletRight, bulletShape);
+                    }
+                    else
+                    {
+
+                    }
+                }
+            }
+
+            //moving bullets
+            for (auto bullet = bulletList.begin(); bullet != bulletList.end();)
+            {
+                bool remove = false;
+                if (bullet->first.direction == "up" && bullet->second.getPosition().y - bulletRadius / 2 > 6.f && bullet->first.bounces < 1)
+                {
+                    bullet->second.move(bullet->first.ranValue, -bulletSpeed * deltaTime);
+                }
+                else if (bullet->first.direction == "down" && bullet->second.getPosition().y + bulletRadius / 2 < gameHeight - 6.f && bullet->first.bounces < 1)
+                {
+                    bullet->second.move(bullet->first.ranValue, bulletSpeed * deltaTime);
+                }
+                else if (bullet->first.direction == "left" && (bullet->second.getPosition().x + bulletRadius / 2 > 10.f) && bullet->first.bounces < 1)
+                {
+                    bullet->second.move(-bulletSpeed * deltaTime, bullet->first.ranValue);
+                }
+                else if (bullet->first.direction == "right" && (bullet->second.getPosition().x - bulletRadius / 2 < gameWidth - 10.f) && bullet->first.bounces < 1)
+                {
+                    bullet->second.move(bulletSpeed * deltaTime, bullet->first.ranValue); 
+                }
+                else
+                {
+                    remove = true;
+                }
+
+                if (remove == true)
+                {
+                    bullet = bulletList.erase(bullet);
+                }
+                else
+                {
+                    bullet++;
+                }
+            }
+
+            //check for collisions between player and bullets and bullets and enemies
+            sf::FloatRect playerBounds = player.getGlobalBounds(); 
+            for (auto bullet = bulletList.begin(); bullet != bulletList.end();) 
+            {
+                bool collision = false;
+                sf::FloatRect bulletBounds = bullet->second.getGlobalBounds();   
+
+                if (playerBounds.intersects(bulletBounds)) 
+                {
+                    isPlaying = false; 
+                }
+
+                for (auto enemy = enemyList.begin(); enemy != enemyList.end(); enemy++) 
+                {
+                    sf::FloatRect enemyBounds = enemy->second.getGlobalBounds();    
+                    if (enemyBounds.intersects(bulletBounds))
+                    {
+                        enemyList.erase(enemy);
+                        collision = true;  
+                        break;
+                    }
+                }
+                if (collision)
+                {
+                    //add score for defeated enemy
+                    playerScore++;
+
+                    //create pointGet text popup and provide time of its creation in its pointStruct before storing in pointGetList
+                    pointStruct pointGet; 
+                    pointGet.spawnTime = chrono::system_clock::now();  
+                    sf::Text pointMessage; 
+                    pointMessage.setFont(font); 
+                    pointMessage.setCharacterSize(30); 
+                    pointMessage.setString("+1 Points!"); 
+                    pointMessage.setFillColor(sf::Color::Yellow); 
+                    pointMessage.setPosition(bullet->second.getPosition().x, bullet->second.getPosition().y);   
+                    pointGetList.emplace_back(pointGet, pointMessage);
+                    //remove bullet due to collision
+                    bullet = bulletList.erase(bullet); 
+                }
+                else
+                {
+                    bullet++; 
+                }
+            } 
+
+            //collect current time and compare it to time since last spawn or starting value before spawning new enemies
+            auto thisSpawn = chrono::system_clock::now();
+            auto timeSinceLastSpawn = thisSpawn - lastSpawn;
+            auto timeSinceSpawnInMS = chrono::duration_cast<chrono::milliseconds>(timeSinceLastSpawn).count();
+            if (timeSinceSpawnInMS >= (spawnLimitInMS - spawnBuff))    
+            {
+                lastSpawn = chrono::system_clock::now();
+                int ranNum = enemydis(enemygen);
+                if (spawnLimitInMS - spawnBuff > 90)
+                {
+                    spawnBuff += 40; 
+                } 
+                sf::CircleShape enemyShape(25, 3); 
+                enemyShape.setFillColor(sf::Color::Red); 
+                enemyShape.setOutlineColor(sf::Color::Yellow); 
+                switch (ranNum)
+                {
+                case 1:   
+                    {
+                    enemyShape.setPosition(25.f, 25.f); 
+                    break;
+                    }
+                case 2:
+                {
+                    enemyShape.setPosition(500.f, 25.f); 
+                    break;
+                }
+                case 3:
+                {
+                    enemyShape.setPosition(980.f, 25.f);  
+                    break;
+                }
+                case 4:
+                {
+                    enemyShape.setPosition(975.f, 400.f); 
+                    break;
+                }
+                case 5:
+                {
+                    enemyShape.setPosition(975.f, 775.f); 
+                    break;
+                }
+                case 6:
+                {
+                    enemyShape.setPosition(500.f, 775.f); 
+                    break;
+                }
+                case 7:
+                {
+                    enemyShape.setPosition(25.f, 775.f); 
+                    break;
+                }
+                case 8:
+                {
+                    enemyShape.setPosition(25.f, 500.f); 
+                    break;
+                }
+                }
+
+                enemyStruct enemyStruct;
+
+                enemyList.emplace_back(enemyStruct, enemyShape);
+            }
+
+            //check if pointGet popups should be deleted
+            for (auto pointGet = pointGetList.begin(); pointGet != pointGetList.end();) 
+            {
+                chrono::system_clock::time_point currentTime = chrono::system_clock::now();  
+                auto timeDiff = currentTime - pointGet->first.spawnTime;
+                auto timeDiffInMS = chrono::duration_cast<chrono::milliseconds>(timeDiff).count();
+                if (timeDiffInMS >= 1000) 
+                {
+                    pointGet = pointGetList.erase(pointGet); 
+                } 
+                else
+                {
+                    pointGet++; 
+                }
+            }
+
+
+            //get direction vector for enemies and move them along that vector
+            //check for collisions between player and enemies
+            for (auto& enemy : enemyList)
+            {
+                enemy.first.direction = player.getPosition() - enemy.second.getPosition(); 
+                float distance = sqrt(enemy.first.direction.x * enemy.first.direction.x + enemy.first.direction.y * enemy.first.direction.y);
+                if (distance != 0)
+                {  
+                    enemy.first.direction /= distance;
+                    
+                    //enemySpeed ramps up over time as spawnBuff increases
+                    enemy.second.move(enemy.first.direction * (enemySpeed + (spawnBuff / 20)) * deltaTime);  
+                }
+                sf::FloatRect enemyBounds = enemy.second.getGlobalBounds();  
+                if (playerBounds.intersects(enemyBounds))
+                {
+                    //end game loop
+                    isPlaying = false; 
+
+                    //update "you lose" ending screen with new playerScore
+                    string sPlayerScore = to_string(playerScore);  
+                    endingScreen2.setString("Final Score: " + sPlayerScore);   
+                    sf::FloatRect endingBounds2 = endingScreen2.getLocalBounds();  
+                    float endingWidth2 = endingBounds2.width;  
+                    float endingX2 = (gameWidth / 2) - (endingWidth2 / 2);  
+                    endingScreen2.setPosition(endingX2, 250.f); 
+                    lost = true; 
+                    runDone = true;  
+                }
+            }
+
+            //update playerScore
+            string scoreString = to_string(playerScore); 
+            score.setString("Score: " + scoreString);  
+        }
+
+        window.clear(sf::Color(50, 50, 50)); 
+
+        if (isEnteringUsername)
+        {
+            window.draw(startingText1);   
+            window.draw(startingText2); 
+            window.draw(userNameText);   
+        }
+        else if (isPlaying)  
+        {
+            window.draw(topLeftName); 
+            window.draw(gameplayInstructions); 
+            // Draw the player
+            window.draw(player); 
+
+            window.draw(score);  
+
+
+            //draw bullets contained in list
+            for (const auto& bullet : bulletList)
+            {   
+                window.draw(bullet.second); 
+            }
+
+            //draw enemies
+            for (const auto& enemy : enemyList)
+            {
+                window.draw(enemy.second);  
+            }
+
+            //draw pointGet popups
+            for (const auto& pointGet : pointGetList)
+            {
+                window.draw(pointGet.second); 
+            }
+        }
+        else if (drawleaderboard == true)
+        {
+            window.draw(leaderboardTop);
+            window.draw(leaderboardMiddle);   
+            window.draw(leaderboardBottom); 
+            for (sf::Text entry : leaderboardEntries) 
+            {
+                window.draw(entry); 
+            } 
+        } 
+        else if (lost == false)
+        {
+            window.draw(pauseMessage1);
+            window.draw(pauseMessage2); 
+            window.draw(pauseMessage3); 
+        }
+        else if (lost==true)  
+        {
+            window.draw(endingScreen1);  
+            window.draw(endingScreen2); 
+            window.draw(endingScreen3);
+            window.draw(endingScreen4); 
+        }
+        //display what was placed 
+        window.display();
+
+        //sleep for a bit for the CPU
+        sf::sleep(sf::milliseconds(5));     
+    }
+    return EXIT_SUCCESS;
+}
