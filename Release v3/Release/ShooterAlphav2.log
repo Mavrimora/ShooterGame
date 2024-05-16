@@ -1,0 +1,9 @@
+﻿  ShooterAlphav2.cpp
+C:\Users\zombe\source\repos\ShooterAlphav2\ShooterAlphav2.cpp(68,32): error C2371: 'dis': redefinition; different basic types
+C:\Users\zombe\source\repos\ShooterAlphav2\ShooterAlphav2.cpp(60,33): message : see declaration of 'dis'
+C:\Users\zombe\source\repos\ShooterAlphav2\ShooterAlphav2.cpp(302,36): error C2065: 'dis': undeclared identifier
+C:\Users\zombe\source\repos\ShooterAlphav2\ShooterAlphav2.cpp(302,34): error C2440: 'initializing': cannot convert from 'std::uniform_real_distribution<double>' to 'float'
+C:\Users\zombe\source\repos\ShooterAlphav2\ShooterAlphav2.cpp(302,34): message : No user-defined-conversion operator available that can perform this conversion, or the operator cannot be called
+C:\Users\zombe\source\repos\ShooterAlphav2\ShooterAlphav2.cpp(460,30): error C2065: 'dis': undeclared identifier
+C:\Users\zombe\source\repos\ShooterAlphav2\ShooterAlphav2.cpp(460,28): error C2440: 'initializing': cannot convert from 'std::uniform_real_distribution<double>' to 'int'
+C:\Users\zombe\source\repos\ShooterAlphav2\ShooterAlphav2.cpp(460,28): message : No user-defined-conversion operator available that can perform this conversion, or the operator cannot be called
